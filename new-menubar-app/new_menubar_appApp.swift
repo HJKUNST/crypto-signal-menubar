@@ -8,10 +8,13 @@
 import SwiftUI
 
 @main
-struct new_menubar_appApp: App {
+struct YourAppNameApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        // 설정 창을 비워서 기본 WindowGroup을 만들지 않습니다.
+        Settings {
+            EmptyView()
         }
     }
 }
