@@ -50,6 +50,10 @@ final class StatusBarUI {
             renderPinnedMode(quotes: quotes)
         case .auto:
             renderAutoMode(quotes: quotes)
+            // auto mode일 때 carousel이 시작되어 있지 않으면 시작
+            if carouselTimer == nil {
+                startCarousel()
+            }
         }
         
         updateMenu()
@@ -126,12 +130,16 @@ final class StatusBarUI {
     }
     
     private func startCarousel() {
+        // auto mode가 아니면 시작하지 않음
+        guard displayModeService.currentMode == .auto else { return }
+        
         stopCarousel()
+        
         carouselTimer = Timer.scheduledTimer(withTimeInterval: carouselInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.nextCarouselItem()
-            }
+            guard let self = self else { return }
+            self.nextCarouselItem()
         }
+        
         // 타이머를 RunLoop에 추가하여 메뉴바 클릭 시에도 동작하도록
         if let timer = carouselTimer {
             RunLoop.current.add(timer, forMode: .common)
@@ -235,7 +243,16 @@ final class StatusBarUI {
     @objc private func selectAutoMode(_ sender: NSMenuItem) {
         displayModeService.currentMode = .auto
         currentCarouselIndex = 0
+        
+        // auto 모드로 전환 시 즉시 첫 번째 토큰 표시
+        if !allQuotes.isEmpty {
+            render(quotes: allQuotes)
+        }
+        
+        // carousel 시작 (콜백 호출 전에 시작)
         startCarousel()
+        
+        // 콜백 호출 (외부에서 render를 다시 호출할 수 있지만, carousel은 이미 시작됨)
         onDisplayModeChanged?()
         updateMenu()
     }
