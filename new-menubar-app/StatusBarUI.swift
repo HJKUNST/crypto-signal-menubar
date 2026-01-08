@@ -6,25 +6,62 @@
 //
 
 import Cocoa
+import QuartzCore
 
 final class StatusBarUI {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-
+    private var allQuotes: [Quote] = []  // 드롭다운용 전체 가격 저장
+    private let pinnedService = PinnedTokenService()
+    private let displayModeService = DisplayModeService()
+    
+    var onPinnedTokensChanged: (() -> Void)?  // pinned 토큰 변경 시 콜백
+    var onDisplayModeChanged: (() -> Void)?  // 표시 모드 변경 시 콜백
+    
+    // Carousel 관련
+    private var carouselTimer: Timer?
+    private var currentCarouselIndex: Int = 0
+    private let carouselInterval: TimeInterval = 3.0  // 3초마다 전환
+    private let animationDuration: TimeInterval = 0.5  // 애니메이션 지속 시간
+    
     init() {
         // 초기 표시
-        statusItem.button?.title = "BTC ... | ETH ... | USDT ..."
+        statusItem.button?.title = "Loading..."
         
         // 메뉴 설정
-        let menu = NSMenu()
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        quitItem.target = NSApplication.shared
-        menu.addItem(quitItem)
-        statusItem.menu = menu
+        updateMenu()
+        
+        // auto 모드일 때 carousel 시작
+        if displayModeService.currentMode == .auto {
+            startCarousel()
+        }
+    }
+    
+    deinit {
+        stopCarousel()
     }
 
     func render(quotes: [Quote]) {
+        // 드롭다운용 전체 가격 저장
+        allQuotes = quotes
+        
+        // 표시 모드에 따라 다르게 렌더링
+        switch displayModeService.currentMode {
+        case .pinned:
+            renderPinnedMode(quotes: quotes)
+        case .auto:
+            renderAutoMode(quotes: quotes)
+        }
+        
+        updateMenu()
+    }
+    
+    private func renderPinnedMode(quotes: [Quote]) {
+        // 메뉴바에 표시할 코인만 필터링 (pinned된 토큰들)
+        let pinnedCoins = pinnedService.pinnedTokens
+        let menuBarQuotes = quotes.filter { pinnedCoins.contains($0.coin) }
+        
         // 모든 코인을 하나의 attributed string으로 합치기
-        let attributedStrings = quotes.map { formatAttributed($0) }
+        let attributedStrings = menuBarQuotes.map { formatAttributed($0) }
         let combined = NSMutableAttributedString()
         
         for attrStr in attributedStrings {
@@ -33,6 +70,271 @@ final class StatusBarUI {
         }
         
         statusItem.button?.attributedTitle = combined
+    }
+    
+    private func renderAutoMode(quotes: [Quote], animated: Bool = false) {
+        // 모든 토큰을 순서대로 정렬
+        let sortedQuotes = quotes.sorted { quote1, quote2 in
+            let index1 = Coin.dropdownCoins.firstIndex(of: quote1.coin) ?? Int.max
+            let index2 = Coin.dropdownCoins.firstIndex(of: quote2.coin) ?? Int.max
+            return index1 < index2
+        }
+        
+        guard !sortedQuotes.isEmpty else {
+            statusItem.button?.attributedTitle = NSAttributedString(string: "Loading...")
+            return
+        }
+        
+        // 현재 인덱스의 토큰만 표시
+        let currentQuote = sortedQuotes[currentCarouselIndex % sortedQuotes.count]
+        let newAttributedTitle = formatAttributed(currentQuote)
+        
+        if animated, let button = statusItem.button {
+            // 세로 회전 애니메이션 적용
+            animateVerticalRotation(on: button, to: newAttributedTitle)
+        } else {
+            statusItem.button?.attributedTitle = newAttributedTitle
+        }
+    }
+    
+    private func animateVerticalRotation(on button: NSButton, to newTitle: NSAttributedString) {
+        // layer 활성화
+        button.wantsLayer = true
+        
+        guard let layer = button.layer else {
+            button.layer = CALayer()
+            button.attributedTitle = newTitle
+            return
+        }
+        
+        // CATransition을 사용한 세로 회전 효과
+        let transition = CATransition()
+        transition.type = CATransitionType.push
+        transition.subtype = CATransitionSubtype.fromTop  // 위에서 아래로 회전하는 효과
+        transition.duration = animationDuration
+        transition.timingFunction = CAMediaTimingFunction(name: CAMediaTimingFunctionName.easeInEaseOut)
+        
+        // 애니메이션 적용
+        CATransaction.begin()
+        CATransaction.setCompletionBlock {
+            // 애니메이션 완료 후 최종 텍스트 설정
+            button.attributedTitle = newTitle
+        }
+        layer.add(transition, forKey: "verticalRotation")
+        button.attributedTitle = newTitle
+        CATransaction.commit()
+    }
+    
+    private func startCarousel() {
+        stopCarousel()
+        carouselTimer = Timer.scheduledTimer(withTimeInterval: carouselInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.nextCarouselItem()
+            }
+        }
+        // 타이머를 RunLoop에 추가하여 메뉴바 클릭 시에도 동작하도록
+        if let timer = carouselTimer {
+            RunLoop.current.add(timer, forMode: .common)
+        }
+    }
+    
+    private func stopCarousel() {
+        carouselTimer?.invalidate()
+        carouselTimer = nil
+    }
+    
+    private func nextCarouselItem() {
+        guard displayModeService.currentMode == .auto else { return }
+        guard !allQuotes.isEmpty else { return }
+        
+        let sortedQuotes = allQuotes.sorted { quote1, quote2 in
+            let index1 = Coin.dropdownCoins.firstIndex(of: quote1.coin) ?? Int.max
+            let index2 = Coin.dropdownCoins.firstIndex(of: quote2.coin) ?? Int.max
+            return index1 < index2
+        }
+        
+        guard !sortedQuotes.isEmpty else { return }
+        
+        currentCarouselIndex = (currentCarouselIndex + 1) % sortedQuotes.count
+        // 애니메이션과 함께 렌더링
+        renderAutoMode(quotes: allQuotes, animated: true)
+    }
+    
+    private func updateMenu() {
+        let menu = NSMenu()
+        
+        // 표시 모드 선택 메뉴
+        let modeMenu = NSMenu()
+        
+        let pinnedModeItem = NSMenuItem(title: "Pinned Mode", action: #selector(selectPinnedMode(_:)), keyEquivalent: "")
+        pinnedModeItem.target = self
+        pinnedModeItem.state = displayModeService.currentMode == .pinned ? .on : .off
+        modeMenu.addItem(pinnedModeItem)
+        
+        let autoModeItem = NSMenuItem(title: "Auto Mode (Carousel)", action: #selector(selectAutoMode(_:)), keyEquivalent: "")
+        autoModeItem.target = self
+        autoModeItem.state = displayModeService.currentMode == .auto ? .on : .off
+        modeMenu.addItem(autoModeItem)
+        
+        let modeSubmenuItem = NSMenuItem(title: "Display Mode", action: nil, keyEquivalent: "")
+        modeSubmenuItem.submenu = modeMenu
+        menu.addItem(modeSubmenuItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // 상위 10개 토큰 메뉴 아이템 추가
+        for coin in Coin.dropdownCoins {
+            if let quote = allQuotes.first(where: { $0.coin == coin }) {
+                let menuItem = createMenuItem(for: quote)
+                menu.addItem(menuItem)
+            } else {
+                // 아직 가격이 로드되지 않은 경우
+                let menuItem = NSMenuItem(title: "\(coin.rawValue) Loading...", action: nil, keyEquivalent: "")
+                menuItem.isEnabled = false
+                menu.addItem(menuItem)
+            }
+        }
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // 안내 메시지 (pinned 모드일 때만)
+        if displayModeService.currentMode == .pinned {
+            let infoItem = NSMenuItem(title: "클릭하여 메뉴바에 고정 (최소 1개, 최대 3개)", action: nil, keyEquivalent: "")
+            infoItem.isEnabled = false
+            menu.addItem(infoItem)
+        } else {
+            let infoItem = NSMenuItem(title: "Auto 모드: 모든 토큰이 3초마다 순환 표시됩니다", action: nil, keyEquivalent: "")
+            infoItem.isEnabled = false
+            menu.addItem(infoItem)
+        }
+        
+        menu.addItem(NSMenuItem.separator())
+        
+        // Quit 메뉴
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quitItem.target = NSApplication.shared
+        menu.addItem(quitItem)
+        
+        statusItem.menu = menu
+    }
+    
+    @objc private func selectPinnedMode(_ sender: NSMenuItem) {
+        displayModeService.currentMode = .pinned
+        stopCarousel()
+        currentCarouselIndex = 0
+        
+        // pinned 모드로 전환 시 즉시 pinned 토큰들 표시
+        if !allQuotes.isEmpty {
+            render(quotes: allQuotes)
+        }
+        
+        onDisplayModeChanged?()
+        updateMenu()
+    }
+    
+    @objc private func selectAutoMode(_ sender: NSMenuItem) {
+        displayModeService.currentMode = .auto
+        currentCarouselIndex = 0
+        startCarousel()
+        onDisplayModeChanged?()
+        updateMenu()
+    }
+    
+    private func createMenuItem(for quote: Quote) -> NSMenuItem {
+        let priceText: String
+        if quote.coin == .usdt || quote.coin == .usdc {
+            priceText = "₩" + String(format: "%.0f", quote.price)
+        } else {
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.minimumFractionDigits = 2
+            formatter.maximumFractionDigits = 2
+            priceText = "$" + (formatter.string(from: NSNumber(value: quote.price)) ?? String(format: "%.2f", quote.price))
+        }
+        
+        var title = "\(quote.coin.rawValue)  \(priceText)"
+        
+        if (quote.coin == .usdt || quote.coin == .usdc), let premium = quote.premiumPercent {
+            title += " (" + formatPremiumPercent(premium) + ")"
+        }
+        
+        title += "  \(quote.trend.symbol)"
+        
+        // pinned 상태 확인
+        let isPinned = pinnedService.isPinned(quote.coin)
+        
+        let menuItem = NSMenuItem(title: "", action: #selector(togglePinned(_:)), keyEquivalent: "")
+        menuItem.target = self
+        menuItem.representedObject = quote.coin
+        
+        // AttributedString 생성
+        let attributedTitle = NSMutableAttributedString()
+        
+        // 1. 체크마크 추가 (아이콘 앞에, systemGray 색상)
+        if isPinned {
+            let checkMark = NSAttributedString(string: "✓ ", attributes: [.foregroundColor: NSColor.systemGray])
+            attributedTitle.append(checkMark)
+        }
+        
+        // 2. 아이콘 추가 (attributedTitle에 포함)
+        if let iconImage = NSImage(named: quote.coin.imageName) {
+            iconImage.size = NSSize(width: 16, height: 16)
+            let imageAttachment = NSTextAttachment()
+            imageAttachment.image = iconImage
+            imageAttachment.bounds = CGRect(x: 0, y: -3, width: 16, height: 16)
+            let imageString = NSAttributedString(attachment: imageAttachment)
+            attributedTitle.append(imageString)
+            attributedTitle.append(NSAttributedString(string: " "))
+        }
+        
+        // 3. 텍스트 추가
+        let textString = NSAttributedString(string: title)
+        attributedTitle.append(textString)
+        
+        // 4. 화살표 색상 설정
+        let arrowRange = (title as NSString).range(of: quote.trend.symbol)
+        if arrowRange.location != NSNotFound {
+            // attributedTitle에서 화살표 위치 계산 (체크마크 + 아이콘 + 공백 이후)
+            let arrowStartIndex = attributedTitle.length - title.count + arrowRange.location
+            let arrowColor: NSColor
+            switch quote.trend {
+            case .up:
+                arrowColor = .systemGreen
+            case .down:
+                arrowColor = .systemRed
+            case .flat:
+                arrowColor = .labelColor
+            }
+            attributedTitle.addAttribute(.foregroundColor, value: arrowColor, range: NSRange(location: arrowStartIndex, length: arrowRange.length))
+        }
+        
+        menuItem.attributedTitle = attributedTitle
+        
+        return menuItem
+    }
+    
+    @objc private func togglePinned(_ sender: NSMenuItem) {
+        // pinned 모드일 때만 토글 가능
+        guard displayModeService.currentMode == .pinned else { return }
+        
+        guard let coin = sender.representedObject as? Coin else { return }
+        
+        let success = pinnedService.togglePinned(coin)
+        if success {
+            // 메뉴 업데이트
+            updateMenu()
+            // UI 업데이트 (pinned 토큰 변경 반영)
+            onPinnedTokensChanged?()
+        } else {
+            // 제한 메시지 표시 (선택사항)
+            let message: String
+            if pinnedService.pinnedTokens.count >= 3 {
+                message = "최대 3개까지만 선택할 수 있습니다."
+            } else {
+                message = "최소 1개는 선택해야 합니다."
+            }
+            print("[INFO] \(message)")
+        }
     }
 
     private func formatAttributed(_ q: Quote) -> NSAttributedString {
@@ -53,11 +355,11 @@ final class StatusBarUI {
         
         // 가격 포맷팅
         let priceText: String
-        if q.coin == .usdt {
-            // USDT는 원화 기호(₩) 추가
+        if q.coin == .usdt || q.coin == .usdc {
+            // USDT, USDC는 원화 기호(₩) 추가
             priceText = "₩" + String(format: "%.0f", q.price)
         } else {
-            // BTC, ETH는 USD로 표시 (천 단위 구분자와 소수점 2자리)
+            // BTC, ETH 등은 USD로 표시 (천 단위 구분자와 소수점 2자리)
             let formatter = NumberFormatter()
             formatter.numberStyle = .decimal
             formatter.minimumFractionDigits = 2
@@ -65,11 +367,11 @@ final class StatusBarUI {
             priceText = "$" + (formatter.string(from: NSNumber(value: q.price)) ?? String(format: "%.2f", q.price))
         }
         
-        // 레이아웃: (icon)(price)(김프%)(arrow) - ticker 제거
+        // 레이아웃: (icon)(price)(spread%)(arrow) - ticker 제거
         var text = priceText
         
-        // USDT일 때만 김치프리미엄 표시 (괄호로 감싸기)
-        if q.coin == .usdt, let premium = q.premiumPercent {
+        // USDT, USDC일 때 spread/premium 표시 (괄호로 감싸기)
+        if (q.coin == .usdt || q.coin == .usdc), let premium = q.premiumPercent {
             text += " (" + formatPremiumPercent(premium) + ")"
         }
         

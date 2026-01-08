@@ -23,4 +23,22 @@ final class BinanceClient {
         guard let p = Double(decoded.price) else { throw URLError(.cannotParseResponse) }
         return p
     }
+    
+    // 여러 심볼의 가격을 병렬로 가져오기
+    func fetchPrices(symbols: [String]) async throws -> [String: Double] {
+        try await withThrowingTaskGroup(of: (String, Double).self) { group in
+            for symbol in symbols {
+                group.addTask {
+                    let price = try await self.fetchPrice(symbol: symbol)
+                    return (symbol, price)
+                }
+            }
+            
+            var results: [String: Double] = [:]
+            for try await (symbol, price) in group {
+                results[symbol] = price
+            }
+            return results
+        }
+    }
 }
