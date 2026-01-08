@@ -325,6 +325,18 @@ final class StatusBarUI {
             attributedTitle.addAttribute(.foregroundColor, value: arrowColor, range: NSRange(location: arrowStartIndex, length: arrowRange.length))
         }
         
+        // 5. Auto mode일 때 메뉴 너비 제한 (폰트 크기 줄이기 및 paragraph style 적용)
+        if displayModeService.currentMode == .auto {
+            // 폰트 크기를 약간 줄여서 메뉴 너비 감소
+            let font = NSFont.systemFont(ofSize: 12)
+            attributedTitle.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributedTitle.length))
+            
+            let paragraphStyle = NSMutableParagraphStyle()
+            paragraphStyle.lineBreakMode = .byTruncatingTail
+            paragraphStyle.maximumLineHeight = 16
+            attributedTitle.addAttribute(.paragraphStyle, value: paragraphStyle, range: NSRange(location: 0, length: attributedTitle.length))
+        }
+        
         menuItem.attributedTitle = attributedTitle
         
         return menuItem
