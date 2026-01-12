@@ -231,18 +231,23 @@ final class StatusBarUI {
         stopCarousel()
         currentCarouselIndex = 0
         
+        // 메뉴를 먼저 업데이트하여 상태 동기화
+        updateMenu()
+        
         // pinned 모드로 전환 시 즉시 pinned 토큰들 표시
         if !allQuotes.isEmpty {
             render(quotes: allQuotes)
         }
         
         onDisplayModeChanged?()
-        updateMenu()
     }
     
     @objc private func selectAutoMode(_ sender: NSMenuItem) {
         displayModeService.currentMode = .auto
         currentCarouselIndex = 0
+        
+        // 메뉴를 먼저 업데이트하여 상태 동기화
+        updateMenu()
         
         // auto 모드로 전환 시 즉시 첫 번째 토큰 표시
         if !allQuotes.isEmpty {
@@ -254,7 +259,6 @@ final class StatusBarUI {
         
         // 콜백 호출 (외부에서 render를 다시 호출할 수 있지만, carousel은 이미 시작됨)
         onDisplayModeChanged?()
-        updateMenu()
     }
     
     private func createMenuItem(for quote: Quote) -> NSMenuItem {
@@ -350,10 +354,10 @@ final class StatusBarUI {
         
         let success = pinnedService.togglePinned(coin)
         if success {
-            // 메뉴 업데이트
-            updateMenu()
-            // UI 업데이트 (pinned 토큰 변경 반영)
+            // UI 업데이트 (pinned 토큰 변경 반영) - 먼저 호출하여 메뉴바에 즉시 반영
             onPinnedTokensChanged?()
+            // 메뉴 업데이트 (드롭다운 메뉴의 체크마크 상태 업데이트)
+            updateMenu()
         } else {
             // 제한 메시지 표시 (선택사항)
             let message: String
