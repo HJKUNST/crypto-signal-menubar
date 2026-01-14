@@ -7,12 +7,15 @@
 
 import Cocoa
 import QuartzCore
+import os.log
 
+@MainActor
 final class StatusBarUI {
     private let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private var allQuotes: [Quote] = []  // 드롭다운용 전체 가격 저장
     private let pinnedService = PinnedTokenService()
     private let displayModeService = DisplayModeService()
+    private let logger = Logger(subsystem: "com.new-menubar-app", category: "StatusBarUI")
     
     var onPinnedTokensChanged: (() -> Void)?  // pinned 토큰 변경 시 콜백
     var onDisplayModeChanged: (() -> Void)?  // 표시 모드 변경 시 콜백
@@ -37,26 +40,39 @@ final class StatusBarUI {
     }
     
     deinit {
-        stopCarousel()
+        // deinit은 nonisolated이므로 직접 invalidate (thread-safe)
+        carouselTimer?.invalidate()
+        carouselTimer = nil
     }
 
     func render(quotes: [Quote]) {
-        // 드롭다운용 전체 가격 저장
+        logger.info("[UI] render() 호출됨 - \(quotes.count)개 토큰")
+        print("[UI] render() 호출됨 - \(quotes.count)개 토큰")
+        
+        // 드롭다운용 전체 가격 저장 (먼저 업데이트하여 메뉴에서 최신 가격 사용)
         allQuotes = quotes
+        
+        // 메뉴 업데이트 (드롭다운 메뉴의 가격 정보 갱신) - 최신 quotes 사용
+        updateMenu(quotes: quotes)
         
         // 표시 모드에 따라 다르게 렌더링
         switch displayModeService.currentMode {
         case .pinned:
+            logger.info("[UI] Pinned 모드로 렌더링")
+            print("[UI] Pinned 모드로 렌더링")
             renderPinnedMode(quotes: quotes)
         case .auto:
-            renderAutoMode(quotes: quotes)
+            logger.info("[UI] Auto 모드로 렌더링")
+            print("[UI] Auto 모드로 렌더링")
+            renderAutoMode(quotes: quotes, animated: false)
             // auto mode일 때 carousel이 시작되어 있지 않으면 시작
             if carouselTimer == nil {
                 startCarousel()
             }
         }
         
-        updateMenu()
+        logger.info("[UI] render() 완료")
+        print("[UI] render() 완료")
     }
     
     private func renderPinnedMode(quotes: [Quote]) {
@@ -64,13 +80,22 @@ final class StatusBarUI {
         let pinnedCoins = pinnedService.pinnedTokens
         let menuBarQuotes = quotes.filter { pinnedCoins.contains($0.coin) }
         
+        guard !menuBarQuotes.isEmpty else {
+            // pinned 토큰에 대한 가격이 아직 로드되지 않은 경우
+            statusItem.button?.attributedTitle = NSAttributedString(string: "Loading...")
+            return
+        }
+        
         // 모든 코인을 하나의 attributed string으로 합치기
         let attributedStrings = menuBarQuotes.map { formatAttributed($0) }
         let combined = NSMutableAttributedString()
         
-        for attrStr in attributedStrings {
+        for (index, attrStr) in attributedStrings.enumerated() {
             combined.append(attrStr)
-            combined.append(NSAttributedString(string: "   "))  // 요소 간 gap 증가
+            // 마지막 요소가 아니면 gap 추가
+            if index < attributedStrings.count - 1 {
+                combined.append(NSAttributedString(string: "   "))  // 요소 간 gap
+            }
         }
         
         statusItem.button?.attributedTitle = combined
@@ -137,7 +162,11 @@ final class StatusBarUI {
         
         carouselTimer = Timer.scheduledTimer(withTimeInterval: carouselInterval, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            self.nextCarouselItem()
+            // Timer 클로저는 nonisolated이므로 Task로 감싸서 메인 스레드에서 실행
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.nextCarouselItem()
+            }
         }
         
         // 타이머를 RunLoop에 추가하여 메뉴바 클릭 시에도 동작하도록
@@ -168,7 +197,10 @@ final class StatusBarUI {
         renderAutoMode(quotes: allQuotes, animated: true)
     }
     
-    private func updateMenu() {
+    private func updateMenu(quotes: [Quote]? = nil) {
+        // 최신 quotes를 사용 (파라미터가 없으면 allQuotes 사용)
+        let currentQuotes = quotes ?? allQuotes
+        
         let menu = NSMenu()
         
         // 표시 모드 선택 메뉴
@@ -192,7 +224,7 @@ final class StatusBarUI {
         
         // 상위 10개 토큰 메뉴 아이템 추가
         for coin in Coin.dropdownCoins {
-            if let quote = allQuotes.first(where: { $0.coin == coin }) {
+            if let quote = currentQuotes.first(where: { $0.coin == coin }) {
                 let menuItem = createMenuItem(for: quote)
                 menu.addItem(menuItem)
             } else {
@@ -310,23 +342,27 @@ final class StatusBarUI {
         
         // 3. 텍스트 추가
         let textString = NSAttributedString(string: title)
+        let textStartIndex = attributedTitle.length
         attributedTitle.append(textString)
         
         // 4. 화살표 색상 설정
         let arrowRange = (title as NSString).range(of: quote.trend.symbol)
         if arrowRange.location != NSNotFound {
-            // attributedTitle에서 화살표 위치 계산 (체크마크 + 아이콘 + 공백 이후)
-            let arrowStartIndex = attributedTitle.length - title.count + arrowRange.location
-            let arrowColor: NSColor
-            switch quote.trend {
-            case .up:
-                arrowColor = .systemGreen
-            case .down:
-                arrowColor = .systemRed
-            case .flat:
-                arrowColor = .labelColor
+            // attributedTitle에서 화살표 위치 계산 (텍스트 시작 위치 + 화살표 위치)
+            let arrowStartIndex = textStartIndex + arrowRange.location
+            // 범위 검증
+            if arrowStartIndex + arrowRange.length <= attributedTitle.length {
+                let arrowColor: NSColor
+                switch quote.trend {
+                case .up:
+                    arrowColor = .systemGreen
+                case .down:
+                    arrowColor = .systemRed
+                case .flat:
+                    arrowColor = .labelColor
+                }
+                attributedTitle.addAttribute(.foregroundColor, value: arrowColor, range: NSRange(location: arrowStartIndex, length: arrowRange.length))
             }
-            attributedTitle.addAttribute(.foregroundColor, value: arrowColor, range: NSRange(location: arrowStartIndex, length: arrowRange.length))
         }
         
         // 5. Auto mode일 때 메뉴 너비 제한 (폰트 크기 줄이기 및 paragraph style 적용)

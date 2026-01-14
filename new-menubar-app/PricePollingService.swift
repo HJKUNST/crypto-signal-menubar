@@ -6,12 +6,14 @@
 //
 
 import Foundation
+import os.log
 
 @MainActor
 final class PricePollingService {
     private let binance = BinanceClient()
     private let upbit = UpbitClient()
     private let fx = ExchangeRateService()
+    private let logger = Logger(subsystem: "com.new-menubar-app", category: "PricePolling")
 
     // 직전 가격 저장 (추세 계산용)
     private var lastPrice: [Coin: Double] = [:]
@@ -25,27 +27,33 @@ final class PricePollingService {
     func start(pollSeconds: UInt64) {
         stop()
 
-        task = Task {
+        task = Task { @MainActor in
             // 즉시 첫 번째 가격 가져오기
+            logger.info("[LOADING] 초기 가격 데이터 로딩 시작...")
             print("[LOADING] 초기 가격 데이터 로딩 시작...")
             do {
                 let quotes = try await fetchAll()
+                logger.info("[SUCCESS] 가격 데이터 로딩 완료: \(quotes.count)개 토큰")
                 print("[SUCCESS] 가격 데이터 로딩 완료: \(quotes.count)개 토큰")
                 onUpdate?(quotes)
             } catch {
+                logger.error("[ERROR] 가격 가져오기 실패: \(error.localizedDescription)")
                 print("[ERROR] 가격 가져오기 실패: \(error.localizedDescription)")
             }
             
             // 이후 주기적으로 갱신
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: pollSeconds * 1_000_000_000)
+                logger.info("[LOADING] 가격 데이터 갱신 시작...")
                 print("[LOADING] 가격 데이터 갱신 시작...")
                 do {
                     let quotes = try await fetchAll()
+                    logger.info("[SUCCESS] 가격 데이터 갱신 완료: \(quotes.count)개 토큰")
                     print("[SUCCESS] 가격 데이터 갱신 완료: \(quotes.count)개 토큰")
                     onUpdate?(quotes)
                 } catch {
                     // 네트워크 오류 등: UI를 그대로 두거나 "…" 표시로 처리 가능
+                    logger.error("[ERROR] 가격 가져오기 실패: \(error.localizedDescription)")
                     print("[ERROR] 가격 가져오기 실패: \(error.localizedDescription)")
                 }
             }
